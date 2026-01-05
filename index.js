@@ -1,12 +1,22 @@
 import { Client, Events, GatewayIntentBits, EmbedBuilder } from 'discord.js';
+import { joinVoiceChannel } from '@discordjs/voice';
 import dotenv from 'dotenv';
+import {
+    getQueue,
+    createQueue,
+    deleteQueue,
+    playSong,
+    searchSong,
+    setupPlayerEvents
+} from './music.js';
 
 dotenv.config();
 
 const client = new Client({
     intents: [
         GatewayIntentBits.Guilds,
-        GatewayIntentBits.GuildMembers  // จำเป็นสำหรับการตรวจจับสมาชิกใหม่
+        GatewayIntentBits.GuildMembers,  // จำเป็นสำหรับการตรวจจับสมาชิกใหม่
+        GatewayIntentBits.GuildVoiceStates  // จำเป็นสำหรับระบบเพลง
     ]
 });
 
@@ -95,8 +105,151 @@ client.on(Events.GuildMemberRemove, async member => {
 client.on(Events.InteractionCreate, async interaction => {
     if (!interaction.isChatInputCommand()) return;
 
-    if (interaction.commandName === 'ping') {
+    const { commandName, options, guild, member } = interaction;
+
+    // 🏓 Ping
+    if (commandName === 'ping') {
         await interaction.reply('Pong!');
+    }
+
+    // 🎵 Play - เล่นเพลง
+    else if (commandName === 'play') {
+        const query = options.getString('song');
+        const voiceChannel = member.voice.channel;
+
+        if (!voiceChannel) {
+            return interaction.reply({
+                content: '❌ คุณต้องอยู่ในห้องเสียงก่อน!',
+                ephemeral: true
+            });
+        }
+
+        await interaction.deferReply();
+
+        // ค้นหาเพลง
+        const song = await searchSong(query);
+        if (!song) {
+            return interaction.editReply('❌ ไม่พบเพลงที่ค้นหา');
+        }
+
+        // สร้างหรือดึง queue
+        let queue = getQueue(guild.id);
+        if (!queue) {
+            queue = createQueue(guild.id);
+
+            // เชื่อมต่อห้องเสียง
+            const connection = joinVoiceChannel({
+                channelId: voiceChannel.id,
+                guildId: guild.id,
+                adapterCreator: guild.voiceAdapterCreator,
+            });
+
+            queue.connection = connection;
+            connection.subscribe(queue.player);
+
+            // ตั้งค่า events
+            setupPlayerEvents(guild.id, interaction.channel);
+        }
+
+        // เพิ่มเพลงเข้าคิว
+        queue.songs.push(song);
+
+        const embed = new EmbedBuilder()
+            .setColor(0x57F287)
+            .setTitle('🎵 เพิ่มเพลงเข้าคิว')
+            .setDescription(`**${song.title}**`)
+            .addFields(
+                { name: '⏱️ ความยาว', value: song.duration || 'ไม่ทราบ', inline: true },
+                { name: '📋 ลำดับในคิว', value: `${queue.songs.length}`, inline: true }
+            )
+            .setThumbnail(song.thumbnail);
+
+        await interaction.editReply({ embeds: [embed] });
+
+        // ถ้าไม่ได้เล่นอยู่ ให้เริ่มเล่น
+        if (!queue.playing) {
+            await playSong(guild.id, song);
+            interaction.channel.send(`🎶 กำลังเล่น: **${song.title}**`);
+        }
+    }
+
+    // ⏹️ Stop - หยุดเพลงและออกจากห้อง
+    else if (commandName === 'stop') {
+        const queue = getQueue(guild.id);
+
+        if (!queue) {
+            return interaction.reply({
+                content: '❌ ไม่มีเพลงกำลังเล่นอยู่',
+                ephemeral: true
+            });
+        }
+
+        deleteQueue(guild.id);
+        await interaction.reply('⏹️ หยุดเพลงและออกจากห้องเสียงแล้ว');
+    }
+
+    // ⏭️ Skip - ข้ามเพลง
+    else if (commandName === 'skip') {
+        const queue = getQueue(guild.id);
+
+        if (!queue || queue.songs.length === 0) {
+            return interaction.reply({
+                content: '❌ ไม่มีเพลงในคิว',
+                ephemeral: true
+            });
+        }
+
+        queue.player.stop(); // จะ trigger AudioPlayerStatus.Idle
+        await interaction.reply('⏭️ ข้ามเพลงแล้ว');
+    }
+
+    // 📋 Queue - ดูคิวเพลง
+    else if (commandName === 'queue') {
+        const queue = getQueue(guild.id);
+
+        if (!queue || queue.songs.length === 0) {
+            return interaction.reply({
+                content: '📭 ไม่มีเพลงในคิว',
+                ephemeral: true
+            });
+        }
+
+        const songList = queue.songs
+            .slice(0, 10)
+            .map((song, index) => `${index === 0 ? '🎵' : `${index}.`} ${song.title}`)
+            .join('\n');
+
+        const embed = new EmbedBuilder()
+            .setColor(0x5865F2)
+            .setTitle('📋 คิวเพลง')
+            .setDescription(songList)
+            .setFooter({ text: `ทั้งหมด ${queue.songs.length} เพลง` });
+
+        await interaction.reply({ embeds: [embed] });
+    }
+
+    // 🎵 Now Playing - เพลงที่กำลังเล่น
+    else if (commandName === 'nowplaying') {
+        const queue = getQueue(guild.id);
+
+        if (!queue || queue.songs.length === 0) {
+            return interaction.reply({
+                content: '❌ ไม่มีเพลงกำลังเล่นอยู่',
+                ephemeral: true
+            });
+        }
+
+        const song = queue.songs[0];
+        const embed = new EmbedBuilder()
+            .setColor(0xEB459E)
+            .setTitle('🎵 กำลังเล่น')
+            .setDescription(`**${song.title}**`)
+            .addFields(
+                { name: '⏱️ ความยาว', value: song.duration || 'ไม่ทราบ', inline: true }
+            )
+            .setThumbnail(song.thumbnail);
+
+        await interaction.reply({ embeds: [embed] });
     }
 });
 
