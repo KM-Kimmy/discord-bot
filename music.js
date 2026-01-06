@@ -1,10 +1,9 @@
 import {
-    joinVoiceChannel,
     createAudioPlayer,
     createAudioResource,
     AudioPlayerStatus,
-    VoiceConnectionStatus,
-    entersState
+    StreamType,
+    NoSubscriberBehavior
 } from '@discordjs/voice';
 import play from 'play-dl';
 
@@ -16,14 +15,21 @@ export function getQueue(guildId) {
 }
 
 export function createQueue(guildId) {
+    const player = createAudioPlayer({
+        behaviors: {
+            noSubscriber: NoSubscriberBehavior.Play
+        }
+    });
+
     const queue = {
         songs: [],
-        player: createAudioPlayer(),
+        player: player,
         connection: null,
         playing: false,
         loop: false
     };
     queues.set(guildId, queue);
+    console.log(`✅ Created queue for guild: ${guildId}`);
     return queue;
 }
 
@@ -35,31 +41,47 @@ export function deleteQueue(guildId) {
             queue.connection.destroy();
         }
         queues.delete(guildId);
+        console.log(`🗑️ Deleted queue for guild: ${guildId}`);
     }
 }
 
 export async function playSong(guildId, song) {
     const queue = getQueue(guildId);
-    if (!queue) return;
+    if (!queue) {
+        console.error('❌ No queue found for guild:', guildId);
+        return false;
+    }
 
     try {
+        console.log(`🎵 Attempting to play: ${song.title}`);
+        console.log(`🔗 URL: ${song.url}`);
+
         const stream = await play.stream(song.url);
+        console.log(`📡 Stream type: ${stream.type}`);
+
         const resource = createAudioResource(stream.stream, {
-            inputType: stream.type
+            inputType: stream.type,
+            inlineVolume: true
         });
+
+        resource.volume?.setVolume(0.5);
 
         queue.player.play(resource);
         queue.playing = true;
 
+        console.log(`✅ Started playing: ${song.title}`);
         return true;
     } catch (error) {
         console.error('❌ Error playing song:', error);
+        queue.playing = false;
         return false;
     }
 }
 
 export async function searchSong(query) {
     try {
+        console.log(`🔍 Searching for: ${query}`);
+
         // ถ้าเป็น URL
         if (play.yt_validate(query) === 'video') {
             const info = await play.video_info(query);
@@ -73,9 +95,13 @@ export async function searchSong(query) {
 
         // ถ้าเป็นคำค้นหา
         const results = await play.search(query, { limit: 1 });
-        if (results.length === 0) return null;
+        if (results.length === 0) {
+            console.log('❌ No results found');
+            return null;
+        }
 
         const video = results[0];
+        console.log(`✅ Found: ${video.title}`);
         return {
             title: video.title,
             url: video.url,
@@ -92,25 +118,31 @@ export function setupPlayerEvents(guildId, textChannel) {
     const queue = getQueue(guildId);
     if (!queue) return;
 
+    // Debug: ตรวจสอบสถานะ player
+    queue.player.on(AudioPlayerStatus.Playing, () => {
+        console.log(`▶️ Player is now playing for guild: ${guildId}`);
+    });
+
+    queue.player.on(AudioPlayerStatus.Buffering, () => {
+        console.log(`⏳ Player is buffering for guild: ${guildId}`);
+    });
+
     queue.player.on(AudioPlayerStatus.Idle, async () => {
+        console.log(`⏸️ Player is idle for guild: ${guildId}`);
+
         // เพลงจบแล้ว เล่นเพลงถัดไป
         if (queue.loop && queue.songs.length > 0) {
-            // Loop mode: เล่นเพลงเดิม
             await playSong(guildId, queue.songs[0]);
         } else {
-            // ลบเพลงที่เล่นจบออก
             queue.songs.shift();
 
             if (queue.songs.length > 0) {
-                // เล่นเพลงถัดไป
                 await playSong(guildId, queue.songs[0]);
                 textChannel.send(`🎵 กำลังเล่น: **${queue.songs[0].title}**`);
             } else {
-                // ไม่มีเพลงในคิวแล้ว
                 queue.playing = false;
                 textChannel.send('📭 คิวเพลงหมดแล้ว! ออกจากห้องเสียง...');
 
-                // รอ 30 วินาทีแล้วออกจากห้อง
                 setTimeout(() => {
                     const currentQueue = getQueue(guildId);
                     if (currentQueue && !currentQueue.playing) {
@@ -123,6 +155,9 @@ export function setupPlayerEvents(guildId, textChannel) {
 
     queue.player.on('error', error => {
         console.error('❌ Player error:', error);
+        console.error('Error resource:', error.resource);
         textChannel.send('❌ เกิดข้อผิดพลาดในการเล่นเพลง');
     });
+
+    console.log(`🎧 Player events set up for guild: ${guildId}`);
 }
