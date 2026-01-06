@@ -2,9 +2,9 @@ import {
     createAudioPlayer,
     createAudioResource,
     AudioPlayerStatus,
-    StreamType,
     NoSubscriberBehavior
 } from '@discordjs/voice';
+import ytdl from 'ytdl-core';
 import play from 'play-dl';
 
 // เก็บข้อมูล player และ queue สำหรับแต่ละ server
@@ -56,11 +56,14 @@ export async function playSong(guildId, song) {
         console.log(`🎵 Attempting to play: ${song.title}`);
         console.log(`🔗 URL: ${song.url}`);
 
-        const stream = await play.stream(song.url);
-        console.log(`📡 Stream type: ${stream.type}`);
+        // ใช้ ytdl-core แทน play-dl
+        const stream = ytdl(song.url, {
+            filter: 'audioonly',
+            quality: 'highestaudio',
+            highWaterMark: 1 << 25
+        });
 
-        const resource = createAudioResource(stream.stream, {
-            inputType: stream.type,
+        const resource = createAudioResource(stream, {
             inlineVolume: true
         });
 
@@ -82,18 +85,18 @@ export async function searchSong(query) {
     try {
         console.log(`🔍 Searching for: ${query}`);
 
-        // ถ้าเป็น URL
-        if (play.yt_validate(query) === 'video') {
-            const info = await play.video_info(query);
+        // ถ้าเป็น YouTube URL
+        if (ytdl.validateURL(query)) {
+            const info = await ytdl.getInfo(query);
             return {
-                title: info.video_details.title,
-                url: info.video_details.url,
-                duration: info.video_details.durationRaw,
-                thumbnail: info.video_details.thumbnails[0]?.url
+                title: info.videoDetails.title,
+                url: info.videoDetails.video_url,
+                duration: formatDuration(parseInt(info.videoDetails.lengthSeconds)),
+                thumbnail: info.videoDetails.thumbnails[0]?.url
             };
         }
 
-        // ถ้าเป็นคำค้นหา
+        // ถ้าเป็นคำค้นหา ใช้ play-dl search
         const results = await play.search(query, { limit: 1 });
         if (results.length === 0) {
             console.log('❌ No results found');
@@ -112,6 +115,12 @@ export async function searchSong(query) {
         console.error('❌ Error searching song:', error);
         return null;
     }
+}
+
+function formatDuration(seconds) {
+    const mins = Math.floor(seconds / 60);
+    const secs = seconds % 60;
+    return `${mins}:${secs.toString().padStart(2, '0')}`;
 }
 
 export function setupPlayerEvents(guildId, textChannel) {
@@ -155,7 +164,6 @@ export function setupPlayerEvents(guildId, textChannel) {
 
     queue.player.on('error', error => {
         console.error('❌ Player error:', error);
-        console.error('Error resource:', error.resource);
         textChannel.send('❌ เกิดข้อผิดพลาดในการเล่นเพลง');
     });
 
